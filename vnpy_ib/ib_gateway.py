@@ -9,7 +9,7 @@ SI-202006-1000-USD-FUT  NYMEX
 ES-2020006-C-2430-50-USD-FOP  GLOBEX
 """
 
-
+import pprint
 from copy import copy
 from datetime import datetime, timedelta
 from threading import Thread, Condition
@@ -28,6 +28,7 @@ from ibapi.order_state import OrderState
 from ibapi.ticktype import TickType, TickTypeEnum
 from ibapi.wrapper import EWrapper
 from ibapi.common import BarData as IbBarData
+from ibapi.ticktype import *
 
 from vnpy.trader.gateway import BaseGateway
 from vnpy.trader.object import (
@@ -146,7 +147,9 @@ TICKFIELD_IB2VT: Dict[int, str] = {
     7: "low_price",
     8: "volume",
     9: "pre_close",
+    13: "model_option",
     14: "open_price",
+    83: "delayed_model_option",
 }
 
 # 账户类型映射
@@ -309,9 +312,9 @@ class IbApi(EWrapper):
         msg: str = f"服务器时间: {time_string}"
         self.gateway.write_log(msg)
 
-    def error(self, reqId: TickerId, errorCode: int, errorString: str) -> None:
+    def error(self, reqId: TickerId, errorCode: int, errorString: str,advancedOrderRejectJson: str) -> None:
         """具体错误请求回报"""
-        super().error(reqId, errorCode, errorString)
+        super().error(reqId, errorCode, errorString,advancedOrderRejectJson="")
         if reqId == self.history_reqid:
             self.history_condition.acquire()
             self.history_condition.notify()
@@ -385,6 +388,48 @@ class IbApi(EWrapper):
         tick: TickData = self.ticks[reqId]
         dt: datetime = datetime.fromtimestamp(int(value))
         tick.datetime = self.local_tz.localize(dt)
+
+        self.gateway.on_tick(copy(tick))
+
+    def tickOptionComputation (
+            self,
+            reqId:    TickerId, 
+            tickType: TickType, 
+            tickAttrib: int,
+            impliedVol: float, 
+            delta: float, 
+            optPrice: float, 
+            pvDividend: float,
+            gamma: float, 
+            vega: float, 
+            theta: float, 
+            undPrice: float) -> None:
+
+        """Greek record"""
+        super().tickOptionComputation(
+                reqId, 
+                tickType, 
+                tickAttrib, 
+                impliedVol, 
+                delta, 
+                optPrice, 
+                pvDividend, 
+                gamma, 
+                vega, 
+                theta, 
+                undPrice)
+
+        if tickType not in TICKFIELD_IB2VT:
+            return
+
+        tick: TickData = self.ticks[reqId]
+        tick.implied_volatility = impliedVol
+        tick.delta  = delta
+        tick.option_price = optPrice
+        tick.gamma = gamma
+        tick.vega  = vega
+        tick.theta  = theta
+        tick.und_price  = undPrice
 
         self.gateway.on_tick(copy(tick))
 
@@ -697,6 +742,7 @@ class IbApi(EWrapper):
 
         #  订阅tick数据并创建tick对象缓冲区
         self.reqid += 1
+        self.client.reqMarketDataType(3)
         self.client.reqMktData(self.reqid, ib_contract, "", False, False, [])
 
         tick: TickData = TickData(
